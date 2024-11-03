@@ -1,6 +1,6 @@
 import argparse
 import numpy as np
-from M3W import border_tools as bt, BorderPeel, clustering_tools as ct
+from .M3W import border_tools as bt, BorderPeel, clustering_tools as ct
 from feature_extraction import MultiViewFeatureExtractor
 from supervised_clustering import SupervisedClusterNet, SupervisedClusteringTrainer
 from sklearn.metrics import adjusted_rand_score, adjusted_mutual_info_score

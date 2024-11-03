@@ -1,7 +1,7 @@
 from sklearn.neighbors import NearestNeighbors
 from sklearn.neighbors import KNeighborsRegressor
 from scipy.interpolate import griddata
-from python_algorithms.basic import union_find
+from networkx.utils.union_find import UnionFind
 from time import time
 import numpy as np
 import copy
@@ -150,7 +150,7 @@ def dynamic_3w(
 
     # original_data_points_indices = {}
     data_length = len(data)
-    cluster_uf = union_find.UF(data_length)
+    cluster_uf = UnionFind.UF(data_length)
     original_indices = np.arange(data_length)
     link_thresholds = np.ones(data_length) * dist_threshold
     # for d,i in zip(data,xrange(data_length)):
@@ -434,7 +434,7 @@ def union_find_to_lists(uf):
     list_lists = []
     reps_to_sets = {}
 
-    for i in range(len(uf._id)):
+    for i in range(len(uf.parents)):  # networkx 使用 .parents
         r = uf.find(i)
         if r not in reps_to_sets:
             reps_to_sets[r] = len(list_lists)
@@ -446,20 +446,37 @@ def union_find_to_lists(uf):
 
 
 def uf_to_associations_map(uf, core_points, original_indices):
+    """
+    将UnionFind数据结构转换为关联映射
+
+    参数:
+    uf: networkx.utils.union_find.UnionFind 实例
+    core_points: 核心点列表
+    original_indices: 原始索引列表
+
+    返回:
+    dict: 代表点到关联项的映射
+    """
     reps_items = {}
     reps_to_core = {}
 
+    # 首先处理原始索引
     for original_index in original_indices:
         r = uf.find(original_index)
         reps_to_core[r] = original_index
 
-    for i in range(len(uf._id)):
+    # 遍历所有点
+    for i in range(len(uf.parents)):  # 使用 .parents 替代 ._id
         r = uf.find(i)
 
+        # 如果代表点不在核心点映射中，将当前点设为代表
         if r not in reps_to_core:
             reps_to_core[r] = i
 
+        # 获取关联的核心点
         k = reps_to_core[r]
+
+        # 将当前点添加到对应核心点的列表中
         if k not in reps_items:
             reps_items[k] = []
         reps_items[k].append(i)
