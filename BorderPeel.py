@@ -1,4 +1,4 @@
-from M3W import border_tools as bt
+import border_tools as bt
 from sklearn.base import BaseEstimator
 from sklearn.base import ClusterMixin
 
