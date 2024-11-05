@@ -73,43 +73,58 @@ class BorderPeel(BaseEstimator, ClusterMixin):
         self.border_values_per_iteration = None
 
     def fit(self, X, X_plot_projection=None):
-        """Perform BorderPeel clustering from features
-        Parameters
-        ----------
-        X : array of features (TODO: make it work with sparse arrays)
-        X_projected : A projection of the data to 2D used for plotting the graph during the cluster process
-        """
+        # 初始化自监督学习模块
+        self.ssl_model = SelfSupervisedM3W(
+            input_shape=X.shape[1:],
+            projection_dim=128,
+            latent_dim=64
+        )
 
-        # density estimation
-        if self.method == "exp_local_scaling":
-            border_func = lambda data: bt.rknn_with_distance_transform(data, self.k, bt.exp_local_scaling_transform)
-            # threshold_func = lambda value: value > self.threshold
+        # 数据增强
+        augmenter = keras.Sequential([
+            layers.RandomRotation(0.2),
+            layers.RandomTranslation(0.1, 0.1),
+            layers.RandomZoom(0.1),
+        ])
 
-        result = bt.dynamic_3w(X
-                               , border_func
-                               , None
-                               , max_iterations=self.max_iterations
-                               , mean_border_eps=self.mean_border_eps
-                               , plot_debug_output_dir=self.plot_debug_output_dir
-                               , k=self.k
-                               , precentile=self.border_precentile
-                               , dist_threshold=self.dist_threshold
-                               , link_dist_expansion_factor=self.link_dist_expansion_factor
-                               , verbose=self.verbose
-                               , vis_data=X_plot_projection
-                               , min_cluster_size=self.min_cluster_size
-                               , stopping_precentile=self.stopping_precentile
-                               , should_merge_core_points=self.merge_core_points
-                               , debug_marker_size=self.debug_marker_size
-                               , core_points_threshold=self.core_points_threshold
-                               , dvalue_threshold=self.dvalue_threshold
-                               )
+        # 自监督预训练
+        optimizer = keras.optimizers.Adam()
+        for epoch in range(10):
+            # 生成两个增强视图
+            X1 = augmenter(X)
+            X2 = augmenter(X)
 
-        self.labels_, self.core_points, self.non_merged_core_points, \
-        self.data_sets_by_iterations, self.associations, self.link_thresholds, \
-        self.border_values_per_iteration, self.core_points_indices = result
+            with tf.GradientTape() as tape:
+                # 前向传播
+                z1 = self.ssl_model.encoder(X1)
+                z2 = self.ssl_model.encoder(X2)
+                p1 = self.ssl_model.projection_head(z1)
+                p2 = self.ssl_model.projection_head(z2)
 
-        return self
+                # 计算对比损失
+                loss = self.ssl_model.contrastive_loss(p1, p2)
+
+            # 反向传播
+            gradients = tape.gradient(
+                loss,
+                self.ssl_model.encoder.trainable_variables +
+                self.ssl_model.projection_head.trainable_variables
+            )
+            optimizer.apply_gradients(zip(
+                gradients,
+                self.ssl_model.encoder.trainable_variables +
+                self.ssl_model.projection_head.trainable_variables
+            ))
+
+            if self.verbose:
+                print(f"Epoch {epoch}, Loss: {loss:.4f}")
+
+        # 使用预训练编码器提取特征
+        X_features = self.ssl_model.encoder.predict(X)
+
+        # 原始的M3W聚类
+        result = self._cluster_features(X_features)
+        return result
 
     def fit_predict(self, X, X_plot_projection=None):
         """Performs BorderPeel clustering clustering on X and returns cluster labels.

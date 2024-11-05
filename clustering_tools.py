@@ -1,5 +1,6 @@
 import itertools
 import numpy as np
+import pandas as pd  # Add this line
 import matplotlib.pyplot as plt
 from collections import OrderedDict
 from copy import deepcopy
@@ -14,44 +15,15 @@ from sklearn import metrics
 from sklearn import preprocessing
 
 
-def read_data(filePath, seperator=',', hasLabels=True):
-    """读取数据文件"""
-    import numpy as np
-
-    try:
-        # 读取标签数据
-        labels = []
-        with open(filePath) as handle:
-            for line in handle:
-                line = line.strip()
-                if line:  # 忽略空行
-                    try:
-                        label = int(line)
-                        labels.append(label)
-                    except ValueError:
-                        continue
-
-        # 将标签转换为numpy数组
-        labels = np.array(labels)
-
-        # 根据标签生成简单的二维特征数据
-        n_samples = len(labels)
-        data = np.zeros((n_samples, 2))  # 创建2D特征空间
-
-        # 为不同标签的数据点生成不同的特征
-        for i, label in enumerate(labels):
-            if label == 0:
-                data[i] = [np.cos(i / 50), np.sin(i / 50)]
-            elif label == 1:
-                data[i] = [1 + np.cos(i / 50), 1 + np.sin(i / 50)]
-            else:  # label == 2
-                data[i] = [-1 + np.cos(i / 50), -1 + np.sin(i / 50)]
-
-        return data, labels
-
-    except Exception as e:
-        print(f"Error reading data file: {e}")
-        return None, None
+def read_data(file_path):
+    """Read data from CSV file"""
+    data = pd.read_csv(file_path, header=None)
+    if data.shape[1] > 2:  # If there are more than 2 columns, assume last column is labels
+        X = data.iloc[:, :-1].values  # All columns except last
+        y = data.iloc[:, -1].values   # Last column
+        return X, y
+    else:
+        return data.values, None
 
 
 # read arff file:

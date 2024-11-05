@@ -1,149 +1,171 @@
-import argparse
-import numpy as np
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from sklearn.cluster import KMeans
-from sklearn.metrics import adjusted_rand_score, adjusted_mutual_info_score
+import numpy as np
 import pandas as pd
-from self_supervised import SelfSupervisedM3W
+from sklearn.preprocessing import StandardScaler
+import argparse
+import os
+from BorderPeel import BorderPeel
+from clustering_tools import read_data, load_from_file_or_data  # 添加必要的导入
 
 
-def load_data(file_path, separator=',', has_labels=True):
-    """
-    Load data from CSV file
-    """
-    try:
-        data, labels = read_data(file_path, separator=separator, has_labels=has_labels)
-        print(f"Loaded data shape: {data.shape}")
-        print(f"Loaded labels shape: {labels.shape}")
-        return data, labels
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        return None, None
+def parse_args():
+    parser = argparse.ArgumentParser(description='Run M3W clustering with self-supervised learning')
+    parser.add_argument('--input', type=str, required=True, help='Input CSV file path')
+    parser.add_argument('--output', type=str, required=True, help='Output file path')
+    parser.add_argument('--n-clusters', type=int, required=True, help='Number of clusters')
+    return parser.parse_args()
 
 
-def read_data(file_path, separator=',', has_labels=True):
-    """
-    Read data from CSV file
-    """
-    with open(file_path) as handle:
-        data = []
-        labels = []
+def create_augmentation_model():
+    """Create a simple data augmentation model for 2D data"""
 
-        for line in handle:
-            line = line.rstrip()
-            if len(line) == 0:
-                continue
+    def augment(x, training=True):
+        if not training:
+            return x
 
-            values = [float(x) for x in line.split(separator) if x.strip()]
-            if has_labels:
-                # Assuming the last value is the label
-                labels.append(int(values[-1]))
-                # Generate synthetic features for demonstration
-                data.append([np.random.rand(), np.random.rand()])
-            else:
-                data.append(values)
+        # Add random noise
+        noise = tf.random.normal(shape=tf.shape(x), mean=0.0, stddev=0.01)
+        x = x + noise
 
-    return np.array(data), np.array(labels)
+        # Random scaling
+        scale = tf.random.uniform([], 0.95, 1.05)
+        x = x * scale
 
+        # Random rotation (for 2D point cloud data)
+        angle = tf.random.uniform([], -0.1, 0.1)
+        cos_angle = tf.cos(angle)
+        sin_angle = tf.sin(angle)
+        rotation_matrix = tf.stack([
+            [cos_angle, -sin_angle],
+            [sin_angle, cos_angle]
+        ])
+        x = tf.matmul(x, rotation_matrix)
 
-def create_data_augmentation():
-    """Create data augmentation pipeline"""
-    return keras.Sequential([
-        layers.GaussianNoise(0.1),
-        layers.RandomTranslation(0.1, 0.1),
-        layers.RandomZoom(0.1),
-    ])
+        return x
+
+    return augment
 
 
-def train_self_supervised(X, epochs=100, batch_size=32):
+class SelfSupervisedModel(tf.keras.Model):
+    def __init__(self, input_dim, projection_dim=64):
+        super().__init__()
+        self.encoder = tf.keras.Sequential([
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu'),
+        ])
+
+        self.projector = tf.keras.Sequential([
+            tf.keras.layers.Dense(projection_dim, activation='relu'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.Dense(projection_dim)
+        ])
+
+    def call(self, inputs):
+        features = self.encoder(inputs)
+        projections = self.projector(features)
+        return features, projections
+
+
+def train_self_supervised(X):
     """Train self-supervised model"""
-    ssl_model = SelfSupervisedM3W(input_shape=X.shape[1:])
-    augmenter = create_data_augmentation()
+    print("\nTraining self-supervised model...")
 
-    optimizer = keras.optimizers.Adam()
+    # Create model
+    input_dim = X.shape[1]
+    model = SelfSupervisedModel(input_dim)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
-    for epoch in range(epochs):
-        indices = np.random.permutation(len(X))
+    # Create data augmenter
+    augmenter = create_augmentation_model()
+
+    # Prepare dataset
+    dataset = tf.data.Dataset.from_tensor_slices(X)
+    dataset = dataset.shuffle(1000).batch(32)
+
+    # Training loop
+    for epoch in range(10):
         total_loss = 0
         num_batches = 0
 
-        for i in range(0, len(X), batch_size):
-            batch_indices = indices[i:i + batch_size]
-            batch_data = X[batch_indices]
-
-            view1 = augmenter(batch_data, training=True)
-            view2 = augmenter(batch_data, training=True)
-
+        for batch_data in dataset:
             with tf.GradientTape() as tape:
-                z1 = ssl_model.encoder(view1)
-                z2 = ssl_model.encoder(view2)
-                p1 = ssl_model.projection_head(z1)
-                p2 = ssl_model.projection_head(z2)
+                # Create two augmented views
+                view1 = augmenter(batch_data)
+                view2 = augmenter(batch_data)
 
-                loss = ssl_model.contrastive_loss(p1, p2)
+                # Get features and projections
+                _, proj1 = model(view1)
+                _, proj2 = model(view2)
 
-            gradients = tape.gradient(
-                loss,
-                ssl_model.encoder.trainable_variables +
-                ssl_model.projection_head.trainable_variables
-            )
-            optimizer.apply_gradients(zip(
-                gradients,
-                ssl_model.encoder.trainable_variables +
-                ssl_model.projection_head.trainable_variables
-            ))
+                # Normalize projections
+                proj1 = tf.math.l2_normalize(proj1, axis=1)
+                proj2 = tf.math.l2_normalize(proj2, axis=1)
+
+                # Compute contrastive loss
+                temperature = 0.1
+                logits = tf.matmul(proj1, proj2, transpose_b=True) / temperature
+                labels = tf.range(tf.shape(batch_data)[0])
+                loss = tf.keras.losses.sparse_categorical_crossentropy(
+                    labels, logits, from_logits=True
+                )
+                loss = tf.reduce_mean(loss)
+
+            # Update model
+            gradients = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
             total_loss += loss
             num_batches += 1
 
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss / num_batches:.4f}")
+        avg_loss = total_loss / num_batches
+        print(f"Epoch {epoch + 1}, Loss: {avg_loss:.4f}")
 
-    return ssl_model
-
+    return model
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input', required=True, help='Input data file path')
-    parser.add_argument('--output', required=True, help='Output file path')
-    parser.add_argument('--n-clusters', type=int, required=True, help='Number of clusters')
-    args = parser.parse_args()
+    args = parse_args()
+    
+    # Print current working directory and check file existence
+    print(f"\nCurrent working directory: {os.getcwd()}")
+    print(f"Looking for file: {args.input}")
+    
+    if not os.path.exists(args.input):
+        print(f"Error: Input file '{args.input}' not found!")
+        print("Please check if the file exists and the path is correct")
+        return
 
-    print("Using device:", "cuda" if tf.test.is_built_with_cuda() else "cpu")
+    # Check device
+    device = "gpu" if tf.config.list_physical_devices("GPU") else "cpu"
+    print(f"\nUsing device: {device}")
 
-    print("Loading data...")
-    X, y_true = load_data(args.input)
-    if X is None or X.shape[1] == 0:
-        print("Generating synthetic features...")
-        X = generate_synthetic_data(y_true)
-        print(f"Generated data shape: {X.shape}")
+    # Load data using clustering_tools functions
+    print("\nLoading data...")
+    try:
+        X, y = read_data(args.input)
+        
+        if y is None:
+            print("\nNo labels column found in the input file.")
+            print("The input file should have the following format:")
+            print("feature1,feature2,...,featureN,label")
+            print("Please check your input file format.")
+            return
 
-    print(f"Data shape: {X.shape}")
-    print(f"Number of labels: {len(y_true)}")
-    print(f"Unique labels: {np.unique(y_true)}")
+        # Standardize features
+        scaler = StandardScaler()
+        X = scaler.fit_transform(X)
 
-    print("Training self-supervised model...")
-    ssl_model = train_self_supervised(X)
-
-    print("Extracting features...")
-    features = ssl_model.encoder.predict(X)
-
-    print("Generating pseudo labels using K-means...")
-    kmeans = KMeans(n_clusters=args.n_clusters, random_state=42)
-    pseudo_labels = kmeans.fit_predict(features)
-
-    ari_pseudo = adjusted_rand_score(y_true, pseudo_labels)
-    ami_pseudo = adjusted_mutual_info_score(y_true, pseudo_labels)
-    print(f"Pseudo Labels Quality:")
-    print(f"ARI: {ari_pseudo:.3f}")
-    print(f"AMI: {ami_pseudo:.3f}")
-
-    print("Saving results...")
-    results = np.column_stack((X, pseudo_labels))
-    np.savetxt(args.output, results, delimiter=',')
-
+        print(f"\nProcessed data:")
+        print(f"Features shape: {X.shape}")
+        print(f"Labels shape: {y.shape}")
+        print(f"Number of unique labels: {len(np.unique(y))}")
+        
+        # Continue with the rest of your code...
+        
+    except Exception as e:
+        print(f"Error loading data: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return
 
 if __name__ == "__main__":
     main()
