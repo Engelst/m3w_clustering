@@ -18,19 +18,29 @@ def setup_parser():
 
 def load_data(file_path, separator=',', dim=2):
     try:
-        # First try loading as a regular CSV with headers
-        data = pd.read_csv(file_path, sep=separator)
-        return np.matrix(data.values)
-    except:
-        try:
-            # If that fails, try loading without headers
-            data = pd.read_csv(file_path, sep=separator, header=None)
-            return np.matrix(data.values)
-        except Exception as e:
-            print(f"Error loading data: {str(e)}")
-            print("\nThe input file should be a CSV with numeric features.")
-            print(f"Expected format: {dim} columns of numeric values")
-            exit(1)
+        # Load the data as a single column
+        data = pd.read_csv(file_path, header=None)
+
+        # Convert to numpy array
+        data_array = data.values.flatten()
+
+        # Calculate the number of samples
+        n_samples = len(data_array)
+
+        # Reshape the data into a 2D array with dim columns
+        if n_samples % dim != 0:
+            raise ValueError(f"Data length ({n_samples}) is not divisible by dimensions ({dim})")
+
+        n_points = n_samples // dim
+        reshaped_data = data_array.reshape(n_points, dim)
+
+        return reshaped_data
+
+    except Exception as e:
+        print(f"Error loading data: {str(e)}")
+        print("\nThe input file should be a CSV with numeric values.")
+        print(f"Expected format: Single column of values that can be reshaped into {dim} dimensions")
+        exit(1)
 
 
 def main():
@@ -40,32 +50,42 @@ def main():
     # Print startup information
     print(f"\nCurrent working directory: {os.getcwd()}")
     print(f"\nLooking for file: {args.input}")
-    print(f"\nUsing device: cpu")  # Modify if GPU support is added
+    print(f"\nUsing device: cpu")
     print("\nLoading data...")
 
     # Load the data
     data = load_data(args.input, args.separator, args.dim)
+
+    print(f"\nData shape: {data.shape}")
 
     if data.shape[1] != args.dim:
         print(f"Error: Expected {args.dim} dimensions but got {data.shape[1]} dimensions in the data")
         print("Please check your input file or adjust the --dim parameter")
         exit(1)
 
-    # Create dummy labels (all zeros) for visualization purposes
-    dummy_labels = np.zeros(data.shape[0])
+    # Implement M3W clustering here
+    # For now, we'll just use basic k-means as a placeholder
+    from sklearn.cluster import KMeans
 
-    # Here you would add your M3W clustering implementation
-    # For now, we'll just visualize the raw data
-    if data.shape[1] == 2:  # Only visualize if 2D
+    kmeans = KMeans(n_clusters=args.n_clusters, random_state=42)
+    clusters = kmeans.fit_predict(data)
+
+    # Save results
+    results = np.column_stack((data, clusters))
+    np.savetxt(args.output, results, delimiter=',', fmt='%.6f')
+
+    # Visualize if 2D
+    if args.dim == 2:
         import matplotlib.pyplot as plt
-        ax = draw_clusters(data, dummy_labels, show_plt=True, show_title=True)
-        plt.savefig(args.output + '_initial_data.png')
+        plt.figure(figsize=(10, 8))
+        scatter = plt.scatter(data[:, 0], data[:, 1], c=clusters, cmap='viridis')
+        plt.colorbar(scatter)
+        plt.title(f'Clustering Results (k={args.n_clusters})')
+        plt.savefig(args.output.replace('.txt', '_visualization.png'))
         plt.close()
 
-    # Save the loaded data to confirm it's being read correctly
-    np.savetxt(args.output, data, delimiter=',', fmt='%.6f')
-    print(f"\nData shape: {data.shape}")
-    print(f"Data saved to: {args.output}")
+    print(f"\nResults saved to: {args.output}")
+    print(f"Visualization saved as: {args.output.replace('.txt', '_visualization.png')}")
 
 
 if __name__ == '__main__':
