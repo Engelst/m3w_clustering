@@ -16,6 +16,14 @@ def setup_parser():
     return parser
 
 
+def ensure_dir(file_path):
+    """Create directory if it doesn't exist"""
+    directory = os.path.dirname(file_path)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory)
+        print(f"Created directory: {directory}")
+
+
 def load_data(file_path, separator=',', dim=2):
     try:
         # Load the data as a single column
@@ -37,7 +45,7 @@ def load_data(file_path, separator=',', dim=2):
         return reshaped_data
 
     except Exception as e:
-        print(f"Error loading data: {str(e)}")
+        print(f"Error loading  {str(e)}")
         print("\nThe input file should be a CSV with numeric values.")
         print(f"Expected format: Single column of values that can be reshaped into {dim} dimensions")
         exit(1)
@@ -70,6 +78,9 @@ def main():
     kmeans = KMeans(n_clusters=args.n_clusters, random_state=42)
     clusters = kmeans.fit_predict(data)
 
+    # Create output directory if it doesn't exist
+    ensure_dir(args.output)
+
     # Save results
     results = np.column_stack((data, clusters))
     np.savetxt(args.output, results, delimiter=',', fmt='%.6f')
@@ -81,7 +92,11 @@ def main():
         scatter = plt.scatter(data[:, 0], data[:, 1], c=clusters, cmap='viridis')
         plt.colorbar(scatter)
         plt.title(f'Clustering Results (k={args.n_clusters})')
-        plt.savefig(args.output.replace('.txt', '_visualization.png'))
+
+        # Ensure directory exists for visualization
+        vis_path = args.output.replace('.txt', '_visualization.png')
+        ensure_dir(vis_path)
+        plt.savefig(vis_path)
         plt.close()
 
     print(f"\nResults saved to: {args.output}")
