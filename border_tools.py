@@ -1,185 +1,254 @@
 import numpy as np
-from scipy.spatial.distance import cdist
 from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
-from UnionFind import UnionFind
 import os
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
+from sklearn.cluster import DBSCAN
+import matplotlib.cm as cm
+import time
 
 
-def estimate_lambda(data, k=8):
+def estimate_lambda(X, k=8):
     """
-    Estimate lambda parameter for clustering based on k-nearest neighbors distances
+    Estimate lambda parameter for clustering based on k-nearest neighbors.
 
     Parameters:
     -----------
-    data : array-like
-        Input data points
-    k : int, optional (default=8)
-        Number of nearest neighbors to consider
+    X : array-like of shape (n_samples, n_features)
+        Input data
+    k : int, default=8
+        Number of nearest neighbors to use
 
     Returns:
     --------
     float
         Estimated lambda value
     """
-    # Compute pairwise distances
-    nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto').fit(data)
-    distances, _ = nbrs.kneighbors(data)
-
-    # Get the k-th nearest neighbor distances (exclude self-distance)
-    kth_distances = distances[:, 1:k + 1]
-
-    # Calculate mean distance
-    mean_kth_distance = np.mean(kth_distances)
-
-    # Estimate lambda as inverse of mean distance
-    lambda_estimate = 1.0 / (mean_kth_distance + 1e-10)  # Add small constant to avoid division by zero
-
-    return lambda_estimate
+    nbrs = NearestNeighbors(n_neighbors=k).fit(X)
+    distances, _ = nbrs.kneighbors(X)
+    avg_distances = np.mean(distances[:, 1:], axis=1)  # 排除自身距离
+    lambda_value = np.median(avg_distances)
+    return lambda_value
 
 
-def exp_local_scaling_transform(distances, indices, k):
+def exp_local_scaling_transform(distances, k=7):
     """
-    Exponential local scaling transform for distance values
+    Apply exponential local scaling transform to distances.
+
+    Parameters:
+    -----------
+    distances : array-like
+        Distance matrix
+    k : int, default=7
+        Number of neighbors for local scaling
+
+    Returns:
+    --------
+    array-like
+        Transformed distances
     """
-    sigma = distances[:, k - 1]
-    sigma = np.maximum(sigma, 1e-10)  # Avoid division by zero
-    transformed = np.exp(-distances ** 2 / (sigma.reshape(-1, 1) * sigma))
+    sigma = np.sort(distances, axis=1)[:, k]
+    sigma = sigma.reshape(-1, 1)
+    transformed = np.exp(-distances ** 2 / (sigma * sigma.T))
     return transformed
 
 
 def rknn_with_distance_transform(data, k, transform_func):
     """
-    Calculate reverse k-nearest neighbors with distance transform
+    Compute reverse k-nearest neighbors with distance transformation.
+
+    Parameters:
+    -----------
+    data : array-like
+        Input data
+    k : int
+        Number of neighbors
+    transform_func : callable
+        Function to transform distances
+
+    Returns:
+    --------
+    array-like
+        Border values for each point
     """
-    # Find k nearest neighbors
-    nbrs = NearestNeighbors(n_neighbors=k, algorithm='auto').fit(data)
+    nbrs = NearestNeighbors(n_neighbors=data.shape[0]).fit(data)
     distances, indices = nbrs.kneighbors(data)
 
-    # Apply distance transform
-    transformed = transform_func(distances, indices, k)
+    # Transform distances
+    transformed_distances = transform_func(distances, k)
 
     # Calculate border values
-    border_values = np.zeros(len(data))
-    for i in range(len(data)):
-        for j in range(k):
-            neighbor_idx = indices[i][j]
-            # Add transformed distance if current point is not in neighbor's k-NN
-            if i not in indices[neighbor_idx]:
-                border_values[i] += transformed[i][j]
+    border_values = np.zeros(data.shape[0])
+    for i in range(data.shape[0]):
+        knn_indices = indices[i, 1:k + 1]
+        border_values[i] = np.sum([1 for j in knn_indices if i in indices[j, 1:k + 1]])
 
-    return border_values
+    return border_values / k
 
 
-def dynamic_3w(data, border_func, threshold_func=None, max_iterations=150,
-               mean_border_eps=-1, plot_debug_output_dir=None, k=20,
-               precentile=0, dist_threshold=3, link_dist_expansion_factor=3,
-               verbose=True, vis_data=None, min_cluster_size=3,
-               stopping_precentile=0, should_merge_core_points=True,
-               debug_marker_size=70, core_points_threshold=1,
-               dvalue_threshold=1):
+def dynamic_3w(data, border_func, threshold_func, max_iterations=150, mean_border_eps=-1,
+               plot_debug_output_dir=None, k=20, precentile=0.1, dist_threshold=3,
+               link_dist_expansion_factor=3, verbose=True, vis_data=None,
+               min_cluster_size=3, stopping_precentile=0, should_merge_core_points=True,
+               debug_marker_size=70, core_points_threshold=1, dvalue_threshold=1):
     """
-    Dynamic M3W clustering algorithm
-    """
-    data_length = len(data)
-    cluster_uf = UnionFind(data_length)
+    Perform dynamic 3W clustering.
 
-    # Initialize data structures
+    Parameters:
+    -----------
+    data : array-like
+        Input data
+    border_func : callable
+        Function to compute border values
+    threshold_func : callable
+        Function to determine thresholds
+    max_iterations : int, default=150
+        Maximum number of iterations
+    mean_border_eps : float, default=-1
+        Epsilon value for mean border
+    plot_debug_output_dir : str, optional
+        Directory for debug output plots
+    k : int, default=20
+        Number of neighbors
+    precentile : float, default=0.1
+        Percentile for border values
+    dist_threshold : float, default=3
+        Distance threshold
+    link_dist_expansion_factor : float, default=3
+        Factor for link distance expansion
+    verbose : bool, default=True
+        Whether to print progress
+    vis_data : array-like, optional
+        Data for visualization
+    min_cluster_size : int, default=3
+        Minimum cluster size
+    stopping_precentile : float, default=0
+        Percentile for stopping condition
+    should_merge_core_points : bool, default=True
+        Whether to merge core points
+    debug_marker_size : int, default=70
+        Size of markers in debug plots
+    core_points_threshold : float, default=1
+        Threshold for core points
+    dvalue_threshold : float, default=1
+        Threshold for d-values
+
+    Returns:
+    --------
+    tuple
+        Clustering results including labels, core points, etc.
+    """
+    if vis_data is None:
+        vis_data = data
+
     data_sets_by_iterations = []
     border_values_per_iteration = []
     current_data = data.copy()
-    current_indices = np.arange(data_length)
+    current_vis_data = vis_data.copy()
 
-    # Main iteration loop
-    iteration = 0
-    while len(current_data) > 0 and iteration < max_iterations:
-        if verbose:
-            print(f"Iteration {iteration}, remaining points: {len(current_data)}")
+    # Track indices through iterations
+    current_indices = np.arange(len(data))
+
+    for iteration in range(max_iterations):
+        if len(current_data) < min_cluster_size:
+            break
 
         # Calculate border values
         border_values = border_func(current_data)
         border_values_per_iteration.append(border_values)
 
         # Determine threshold
-        if threshold_func is not None:
-            threshold = threshold_func(border_values)
+        if threshold_func is None:
+            threshold = np.percentile(border_values, precentile * 100)
         else:
-            threshold = np.percentile(border_values, precentile)
+            threshold = threshold_func(border_values)
 
-        # Find core points
-        core_points_mask = border_values <= threshold
-        core_points = current_data[core_points_mask]
-        core_indices = current_indices[core_points_mask]
+        # Select points based on threshold
+        selected_points = border_values > threshold
 
-        if len(core_points) == 0:
+        if np.sum(selected_points) < min_cluster_size:
             break
 
         # Update data sets
-        data_sets_by_iterations.append(core_indices)  # Store indices instead of points
-        current_data = current_data[~core_points_mask]
-        current_indices = current_indices[~core_points_mask]
+        current_data = current_data[selected_points]
+        current_vis_data = current_vis_data[selected_points]
+        current_indices = current_indices[selected_points]
 
-        # Debug plotting
-        if plot_debug_output_dir and vis_data is not None:
-            plot_iteration(iteration, vis_data, core_points,
-                           plot_debug_output_dir, debug_marker_size)
+        data_sets_by_iterations.append((current_indices, current_data, current_vis_data))
 
-        iteration += 1
+        if verbose:
+            print(f"Iteration {iteration}: {len(current_data)} points remaining")
 
-    # Process final results
-    labels = process_clusters(data_sets_by_iterations, cluster_uf,
-                              min_cluster_size, data_length)
+        # Plot debug output if requested
+        if plot_debug_output_dir:
+            plt.figure(figsize=(10, 10))
+            plt.scatter(current_vis_data[:, 0], current_vis_data[:, 1],
+                        c=border_values, cmap='viridis', s=debug_marker_size)
+            plt.colorbar()
+            plt.title(f'Iteration {iteration}')
+            plt.savefig(os.path.join(plot_debug_output_dir, f'iteration_{iteration}.png'))
+            plt.close()
 
-    return labels, data_sets_by_iterations, border_values_per_iteration
+    # Process results
+    core_points = data_sets_by_iterations[-1][1]
+    core_points_indices = data_sets_by_iterations[-1][0]
+
+    # Initialize labels
+    labels = np.full(len(data), -1)
+
+    # Assign cluster labels
+    if should_merge_core_points:
+        # Merge close core points
+        core_clusters = DBSCAN(eps=dist_threshold, min_samples=1).fit(core_points)
+        core_labels = core_clusters.labels_
+
+        # Update labels for core points
+        for i, idx in enumerate(core_points_indices):
+            labels[idx] = core_labels[i]
+    else:
+        # Each core point forms its own cluster
+        for i, idx in enumerate(core_points_indices):
+            labels[idx] = i
+
+    return (labels, core_points, None, data_sets_by_iterations,
+            None, None, border_values_per_iteration, core_points_indices)
 
 
-def plot_iteration(iteration, data, core_points, output_dir, marker_size):
+def border_peel_rknn_exp_transform_local(data, k, threshold, iterations, debug_output_dir=None,
+                                         dist_threshold=3, link_dist_expansion_factor=3, precentile=0, verbose=True):
     """
-    Plot debug information for current iteration
+    Perform border peeling with reverse k-nearest neighbors and exponential transform.
+
+    Parameters:
+    -----------
+    data : array-like
+        Input data
+    k : int
+        Number of neighbors
+    threshold : float
+        Threshold value
+    iterations : int
+        Number of iterations
+    debug_output_dir : str, optional
+        Directory for debug output
+    dist_threshold : float, default=3
+        Distance threshold
+    link_dist_expansion_factor : float, default=3
+        Factor for link distance expansion
+    precentile : float, default=0
+        Percentile value
+    verbose : bool, default=True
+        Whether to print progress
+
+    Returns:
+    --------
+    tuple
+        Results of dynamic_3w clustering
     """
-    plt.figure(figsize=(10, 10))
-    plt.scatter(data[:, 0], data[:, 1], c='gray', alpha=0.5, s=marker_size)
-    plt.scatter(core_points[:, 0], core_points[:, 1], c='red', s=marker_size)
-    plt.title(f'Iteration {iteration}')
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    plt.savefig(os.path.join(output_dir, f'iteration_{iteration}.png'))
-    plt.close()
-
-
-def process_clusters(data_sets, union_find, min_size, data_length):
-    """
-    Process final cluster assignments
-    """
-    labels = np.full(data_length, -1)
-    current_label = 0
-
-    # Process each data set
-    for data_set in data_sets:
-        if len(data_set) >= min_size:
-            for point in data_set:
-                if labels[point] == -1:
-                    labels[point] = current_label
-            current_label += 1
-
-    return labels
-
-
-def border_peel_rknn_exp_transform_local(data, k, threshold, iterations,
-                                         debug_output_dir=None, dist_threshold=3,
-                                         link_dist_expansion_factor=3,
-                                         precentile=0, verbose=True):
-    """
-    Convenience function for border peeling with exponential transform
-    """
-    border_func = lambda rknn_with_distance_transform(
-        data, k, exp_local_scaling_transform)
+    border_func = lambda data: rknn_with_distance_transform(data, k, exp_local_scaling_transform)
     threshold_func = lambda value: value > threshold
-
     return dynamic_3w(data, border_func, threshold_func,
-                      plot_debug_output_dir=debug_output_dir, k=k,
-                      precentile=precentile, dist_threshold=dist_threshold,
-                      link_dist_expansion_factor=link_dist_expansion_factor,
+                      plot_debug_output_dir=debug_output_dir, k=k, precentile=precentile,
+                      dist_threshold=dist_threshold, link_dist_expansion_factor=link_dist_expansion_factor,
                       verbose=verbose)
