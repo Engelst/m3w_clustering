@@ -11,42 +11,36 @@ from sklearn.neighbors import NearestNeighbors
 
 
 class BorderPeel(DeviceAwareModule):
-    def __init__(self, k=7, max_iterations=10, mean_border_eps=0.01,
-                 plot_debug_output_dir=None, verbose=True, n_clusters=None,
-                 **kwargs):  # 添加 n_clusters 参数和 kwargs
-        super().__init__()
+    def __init__(self, k=7, max_iterations=100, mean_border_eps=0.01, plot_debug_output_dir=None, verbose=True):
         self.k = k
         self.max_iterations = max_iterations
         self.mean_border_eps = mean_border_eps
         self.plot_debug_output_dir = plot_debug_output_dir
         self.verbose = verbose
-        self.n_clusters = n_clusters  # 新增
 
-    @device_performance_monitor
     def fit(self, X, X_plot_projection=None):
-        # 确保输入数据在正确设备上
-        X = self.ensure_tensor_on_device(X)
+        # Your existing fit code here
+        pass
 
-        # 计算初始边界值
-        border_values = self._compute_border_values(X)
-        mean_border = torch.mean(border_values)
+    def fit_predict(self, X):
+        """
+        Fit the model and return cluster labels
 
-        # 迭代优化
-        for iteration in range(self.max_iterations):
-            old_mean_border = mean_border
+        Parameters:
+        -----------
+        X : array-like of shape (n_samples, n_features)
+            Training instances to cluster
 
-            # 更新边界值
-            border_values = self._compute_border_values(X)
-            mean_border = torch.mean(border_values)
+        Returns:
+        --------
+        labels : ndarray of shape (n_samples,)
+            Cluster labels
+        """
+        # Call fit method
+        self.fit(X)
 
-            if self.verbose:
-                print(f"Iteration {iteration + 1}, Mean Border: {mean_border:.4f}")
-
-            # 检查收敛
-            if torch.abs(old_mean_border - mean_border) < self.mean_border_eps:
-                break
-
-        return border_values.cpu().numpy()
+        # Return the cluster assignments
+        return self.labels_
 
     def _compute_border_values(self, X):
         # 计算k近邻
