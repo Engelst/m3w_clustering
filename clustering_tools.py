@@ -14,28 +14,44 @@ from sklearn.neighbors import kneighbors_graph
 from sklearn import metrics
 from sklearn import preprocessing
 
+import pandas as pd
+import numpy as np
 
-def read_data(file_path):
-    """Read data from CSV file"""
+
+def read_data(filePath, separator=',', has_labels=True):
+    """
+    Read data from CSV file
+
+    Parameters
+    ----------
+    filePath : str
+        Path to the CSV file
+    separator : str, optional
+        Delimiter used in the CSV file (default is ',')
+    has_labels : bool, optional
+        Whether the last column contains labels (default is True)
+
+    Returns
+    -------
+    tuple
+        (data array, labels array) if has_labels is True
+        (data array, None) if has_labels is False
+    """
     try:
         # Read the CSV file
-        data = pd.read_csv(file_path, header=None)
-        print(f"\nData shape: {data.shape}")
-        print(f"First few rows of data:\n{data.head()}")
-        
-        if data.shape[1] > 2:  # If there are more than 2 columns
-            X = data.iloc[:, :-1].values  # All columns except last
-            y = data.iloc[:, -1].values   # Last column
-            print(f"\nFeatures shape: {X.shape}")
-            print(f"Labels shape: {y.shape}")
-            print(f"Unique labels: {np.unique(y)}")
+        data = pd.read_csv(filePath, header=None, sep=separator)
+
+        if has_labels:
+            # Separate features and labels
+            X = data.iloc[:, :-1].values
+            y = data.iloc[:, -1].values
             return X, y
         else:
-            print("\nWarning: Input file has 2 or fewer columns.")
-            print("Expected format: feature1,feature2,...,featureN,label")
+            # Return only features
             return data.values, None
+
     except Exception as e:
-        print(f"\nError reading file: {str(e)}")
+        print(f"Error reading file {filePath}: {str(e)}")
         raise
 
 
