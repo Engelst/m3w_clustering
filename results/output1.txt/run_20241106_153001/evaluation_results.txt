@@ -1,0 +1,20 @@
+Clustering Evaluation Results
+==========================
+Number of clusters: 3
+Number of samples: 300
+
+Evaluation Metrics:
+-----------------
+ARI: 0.3876
+NMI: 0.4176
+AMI: 0.4139
+Homogeneity: 0.4105
+Completeness: 0.4250
+V-measure: 0.4176
+Silhouette: 0.3996
+
+Cluster Statistics:
+-----------------
+Cluster 0: 95 samples
+Cluster 1: 137 samples
+Cluster 2: 68 samples

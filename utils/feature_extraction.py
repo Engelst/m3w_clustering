@@ -1,158 +1,94 @@
-# import numpy as np
-# from sklearn.decomposition import PCA
-# from sklearn.manifold import SpectralEmbedding
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.cluster import KMeans
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans
+from sklearn.manifold import TSNE, Isomap
+from sklearn.cluster import KMeans, DBSCAN, SpectralClustering
 import numpy as np
-
-
-
-class FeatureExtractor(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
-        super(FeatureExtractor, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim * 4),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 4, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim)
-        )
-
-        self.decoder = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim * 4),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 4, input_dim)
-        )
-
-    def forward(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return encoded, decoded
+from scipy.stats import mode
+from models.autoencoder import EnhancedAutoencoder, AutoencoderTrainer
+from config import Config
 
 class MultiViewFeatureExtractor:
-    def __init__(self, n_components=32, n_neighbors=10):
-        self.n_components = n_components
-        self.n_neighbors = n_neighbors
-        self.scaler = StandardScaler()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.autoencoder = None
-
-    def train_autoencoder(self, data, epochs=100, batch_size=64):
-        """训练自编码器获取特征"""
+    def __init__(self, input_dim, hidden_dim, latent_dim, device=None):
+        """初始化多视图特征提取器
+        
+        参数:
+            input_dim (int): 输入数据维度
+            hidden_dim (int): 自动编码器隐藏层维度
+            latent_dim (int): 潜在空间维度
+            device (torch.device): 计算设备
+        """
+        self.device = device if device is not None else \
+                     torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # 初始化自动编码器
+        try:
+            self.autoencoder = EnhancedAutoencoder(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                latent_dim=latent_dim,
+                device=self.device
+            )
+        except Exception as e:
+            print(f"自动编码器初始化失败: {e}")
+            print("尝试使用CPU模式重新初始化")
+            self.device = torch.device('cpu')
+            self.autoencoder = EnhancedAutoencoder(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                latent_dim=latent_dim,
+                device=self.device
+            )
+        self.autoencoder_trainer = None
+        
+    def train_autoencoder(self, data):
+        """训练自编码器"""
+        print("Training autoencoder...")
         input_dim = data.shape[1]
-        self.autoencoder = FeatureExtractor(input_dim, self.n_components).to(self.device)
-
-        # 准备数据
-        data_tensor = torch.FloatTensor(self.scaler.fit_transform(data)).to(self.device)
-        dataset = TensorDataset(data_tensor)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-        # 训练
-        optimizer = torch.optim.Adam(self.autoencoder.parameters())
-        criterion = nn.MSELoss()
-
-        self.autoencoder.train()
-        for epoch in range(epochs):
-            total_loss = 0
-            for batch in dataloader:
-                inputs = batch[0]
-
-                # 前向传播
-                encoded, decoded = self.autoencoder(inputs)
-
-                # 计算重构损失
-                loss = criterion(decoded, inputs)
-
-                # 反向传播
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item()
-
-            if (epoch + 1) % 10 == 0:
-                print(f'Epoch [{epoch + 1}/{epochs}], Loss: {total_loss / len(dataloader):.4f}')
-
+        
+        # 创建自编码器模型
+        self.autoencoder = EnhancedAutoencoder(
+            input_dim=input_dim,
+            config=Config.AUTOENCODER_CONFIG
+        )
+        
+        # 创建训练器
+        self.autoencoder_trainer = AutoencoderTrainer(
+            self.autoencoder,
+            Config.AUTOENCODER_CONFIG
+        )
+        
+        # 训练自编码器
+        self.autoencoder_trainer.train(data)
+        print("Autoencoder training completed.")
+    
     def extract_features(self, data):
-        """提取多视角特征"""
-        # 标准化数据
-        scaled_data = self.scaler.fit_transform(data)
-
-        # 训练自编码器并获取特征
-        self.train_autoencoder(scaled_data)
-
-        # 使用自编码器提取特征
-        data_tensor = torch.FloatTensor(scaled_data).to(self.device)
-        self.autoencoder.eval()
+        """提取特征"""
+        self.autoencoder.eval()  # 设置为评估模式
         with torch.no_grad():
-            encoded, _ = self.autoencoder(data_tensor)
-            autoencoder_features = encoded.cpu().numpy()
-
-        # 提取PCA特征
-        pca = PCA(n_components=min(self.n_components, data.shape[1]))
-        pca_features = pca.fit_transform(scaled_data)
-
-        # 提取TSNE特征
-        tsne = TSNE(n_components=min(self.n_components, data.shape[1]),
-                    n_iter=250, random_state=42)
-        tsne_features = tsne.fit_transform(scaled_data)
-
-        # 调整特征维度
-        features_list = [autoencoder_features, pca_features, tsne_features]
-        max_dim = max(f.shape[1] for f in features_list)
-        aligned_features = []
-
-        for feat in features_list:
-            if feat.shape[1] < max_dim:
-                pad_width = ((0, 0), (0, max_dim - feat.shape[1]))
-                feat = np.pad(feat, pad_width, mode='constant')
-            aligned_features.append(feat)
-
-        # 合并所有特征
-        combined_features = np.hstack(aligned_features)
-        return combined_features
-
+            features = self.autoencoder.encode(data)
+        return features.cpu().numpy()
+    
     def get_pseudo_labels(self, features, n_clusters):
-        """获取伪标签"""
-        # 确保特征维度能被3整除
-        feature_dim = features.shape[1]
-        view_dim = feature_dim // 3
-        remainder = feature_dim % 3
-
-        if remainder > 0:
-            pad_width = ((0, 0), (0, 3 - remainder))
-            features = np.pad(features, pad_width, mode='constant')
-            feature_dim = features.shape[1]
-
-        # 将特征分成三个视图
-        feature_views = np.split(features, 3, axis=1)
-
-        # 对每个视图进行聚类
-        kmeans_models = []
-        view_labels = []
-
-        for view_features in feature_views:
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-            labels = kmeans.fit_predict(view_features)
-            kmeans_models.append(kmeans)
-            view_labels.append(labels)
-
-        # 使用多数投票确定最终的伪标签
-        view_labels = np.array(view_labels)
-        pseudo_labels = np.zeros(len(features), dtype=int)
-
-        for i in range(len(features)):
-            sample_labels = view_labels[:, i]
-            unique_labels, counts = np.unique(sample_labels, return_counts=True)
-            pseudo_labels[i] = unique_labels[np.argmax(counts)]
-
-        return pseudo_labels
+        """生成伪标签"""
+        from sklearn.cluster import KMeans
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        return kmeans.fit_predict(features)
+    
+    def _batch_process(self, data, batch_size=32):
+        """分批处理大数据集"""
+        n_samples = len(data)
+        features_list = []
+        
+        for i in range(0, n_samples, batch_size):
+            batch = data[i:min(i + batch_size, n_samples)]
+            batch_features = self._extract_features_impl(batch)
+            features_list.append(batch_features)
+            
+            # 主动清理GPU内存
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+                
+        return torch.cat(features_list, dim=0)

@@ -3,105 +3,187 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from argparse import ArgumentParser
-from clustering_tools import load_from_file_or_data, draw_clusters
-
+from clustering_tools import read_data, draw_clusters, evaluate_clustering
+# from models.autoencoder import EnhancedAutoencoder
+from utils.feature_extraction import MultiViewFeatureExtractor
+from BorderPeel import BorderPeel
+from config import Config
+from sklearn.preprocessing import StandardScaler
+import torch
+import matplotlib.pyplot as plt
 
 def setup_parser():
-    parser = ArgumentParser(description='Run M3W clustering on unlabeled data')
-    parser.add_argument('--input', required=True, help='Input CSV file path')
-    parser.add_argument('--output', required=True, help='Output file path')
-    parser.add_argument('--n-clusters', type=int, required=True, help='Number of clusters')
-    parser.add_argument('--separator', default=',', help='CSV separator (default: ,)')
-    parser.add_argument('--dim', type=int, default=2, help='Data dimensionality (default: 2)')
+    parser = ArgumentParser(description='Run M3W clustering on Pathbased dataset')
+    parser.add_argument('--input', type=str, default='res/Pathbased.csv',
+                      help='Input CSV file path (default: res/Pathbased.csv)')
+    parser.add_argument('--output', type=str, default='results',
+                      help='Output directory path (default: results)')
+    parser.add_argument('--n-clusters', type=int, default=3,
+                      help='Number of clusters (default: 3)')
     return parser
 
-
-def ensure_dir(file_path):
+def ensure_dir(directory):
     """Create directory if it doesn't exist"""
-    directory = os.path.dirname(file_path)
-    if directory and not os.path.exists(directory):
-        os.makedirs(directory)
-        print(f"Created directory: {directory}")
+    if not os.path.exists(directory):
+        try:
+            os.makedirs(directory)
+            print(f"Created directory: {directory}")
+        except Exception as e:
+            print(f"Error creating directory: {str(e)}")
+            raise
 
-
-def load_data(file_path, separator=',', dim=2):
+def save_results(X, labels, evaluation_results, args):
+    """保存所有结果"""
     try:
-        # Load the data as a single column
-        data = pd.read_csv(file_path, header=None)
-
-        # Convert to numpy array
-        data_array = data.values.flatten()
-
-        # Calculate the number of samples
-        n_samples = len(data_array)
-
-        # Reshape the data into a 2D array with dim columns
-        if n_samples % dim != 0:
-            raise ValueError(f"Data length ({n_samples}) is not divisible by dimensions ({dim})")
-
-        n_points = n_samples // dim
-        reshaped_data = data_array.reshape(n_points, dim)
-
-        return reshaped_data
-
+        # 创建结果目录
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_dir = os.path.join(args.output, f"run_{timestamp}")
+        ensure_dir(result_dir)
+        
+        # 1. 保存聚类结果
+        results_file = os.path.join(result_dir, "clustering_results.csv")
+        results = np.column_stack((X, labels))
+        pd.DataFrame(results, columns=['x', 'y', 'cluster_label']).to_csv(
+            results_file, index=False, float_format='%.6f'
+        )
+        
+        # 2. 保存评估结果
+        evaluation_file = os.path.join(result_dir, "evaluation_results.txt")
+        with open(evaluation_file, 'w') as f:
+            f.write("Clustering Evaluation Results\n")
+            f.write("==========================\n")
+            f.write(f"Number of clusters: {args.n_clusters}\n")
+            f.write(f"Number of samples: {len(X)}\n\n")
+            
+            f.write("Evaluation Metrics:\n")
+            f.write("-----------------\n")
+            for metric, value in evaluation_results.items():
+                f.write(f"{metric}: {value:.4f}\n")
+            
+            f.write("\nCluster Statistics:\n")
+            f.write("-----------------\n")
+            unique_labels, counts = np.unique(labels, return_counts=True)
+            for label, count in zip(unique_labels, counts):
+                f.write(f"Cluster {label}: {count} samples\n")
+        
+        # 3. 保存可视化结果
+        plot_file = os.path.join(result_dir, "clustering_plot.png")
+        plt.figure(figsize=(10, 8))
+        draw_clusters(X, labels, show_plt=False)
+        plt.title('Pathbased Dataset Clustering Results')
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return result_dir
     except Exception as e:
-        print(f"Error loading  {str(e)}")
-        print("\nThe input file should be a CSV with numeric values.")
-        print(f"Expected format: Single column of values that can be reshaped into {dim} dimensions")
-        exit(1)
+        print(f"Error saving results: {str(e)}")
+        raise
 
+def get_available_device():
+    """检测并返回最适合的设备"""
+    if torch.cuda.is_available():
+        # 检查CUDA是否真的可用
+        try:
+            device = torch.device('cuda')
+            # 测试CUDA是否真的可用
+            torch.zeros(1).cuda()
+            print("使用 CUDA 设备")
+            return device
+        except Exception as e:
+            print(f"CUDA初始化失败: {e}")
+            print("回退到CPU设备")
+    else:
+        print("未检测到CUDA设备，使用CPU")
+    return torch.device('cpu')
+
+def validate_config(config, data_shape):
+    """验证配置参数是否合理"""
+    validated_config = config.copy()
+    
+    # 确保输入维度匹配数据
+    validated_config['input_dim'] = data_shape[1]
+    
+    # 验证其他参数
+    if 'hidden_dim' not in validated_config:
+        validated_config['hidden_dim'] = 32  # 默认值
+    
+    if 'latent_dim' not in validated_config:
+        validated_config['latent_dim'] = 16  # 默认值
+        
+    # 移除任何不需要的参数
+    valid_params = {'input_dim', 'hidden_dim', 'latent_dim', 'device'}
+    return {k: v for k, v in validated_config.items() if k in valid_params}
+
+def setup_torch_defaults(device):
+    """设置PyTorch默认配置"""
+    torch.set_default_dtype(torch.float32)
+    if device.type == 'cuda':
+        torch.set_default_device('cuda')
+    else:
+        torch.set_default_device('cpu')
 
 def main():
-    parser = setup_parser()
-    args = parser.parse_args()
+    args = setup_parser().parse_args()
+    
+    # 获取可用设备
+    device = get_available_device()
+    
+    try:
+        # 设置默认张量类型
+        setup_torch_defaults(device)
+        
+        # 1. 加载数据
+        print("\nLoading data...")
+        data = pd.read_csv(args.input, header=None)
+        X = data.iloc[:, :2].values  # 前两列是特征
+        y = data.iloc[:, 2].values   # 最后一列是标签
+        
+        print(f"Loaded data shape: {X.shape}")
+        print(f"Number of true clusters: {len(np.unique(y))}")
+        
+        # 2. 数据标准化
+        print("\nStandardizing data...")
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # 3. 验证并更新配置
+        config = validate_config(Config.FEATURE_EXTRACTION_CONFIG, X_scaled.shape)
+        config['device'] = device
+        
+        # 4. 特征提取
+        print("\nExtracting features...")
+        feature_extractor = MultiViewFeatureExtractor(**config)
+        features = feature_extractor.extract_features(X_scaled)
+        
+        # 5. 生成伪标签
+        print("\nGenerating pseudo labels...")
+        pseudo_labels = feature_extractor.get_pseudo_labels(features, args.n_clusters)
+        print(f"Generated {len(np.unique(pseudo_labels))} pseudo clusters")
+        
+        # 6. M3W聚类
+        print("\nRunning M3W clustering...")
+        m3w_config = Config.M3W_CONFIG.copy()
+        m3w_config['n_clusters'] = args.n_clusters  # 使用命令行参数的聚类数
+        m3w = BorderPeel(**m3w_config)
+        final_labels = m3w.fit_predict(features)
+        print(f"Final clustering produced {len(np.unique(final_labels))} clusters")
+        
+        # 7. 评估结果
+        print("\nEvaluating clustering results...")
+        evaluation_results = evaluate_clustering(features, y, final_labels)
+        
+        # 8. 保存所有结果
+        print("\nSaving results...")
+        result_dir = save_results(X, final_labels, evaluation_results, args)
+        print(f"\nAll results saved in: {result_dir}")
+        
+    except Exception as e:
+        print(f"\nError: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return
 
-    # Print startup information
-    print(f"\nCurrent working directory: {os.getcwd()}")
-    print(f"\nLooking for file: {args.input}")
-    print(f"\nUsing device: cpu")
-    print("\nLoading data...")
-
-    # Load the data
-    data = load_data(args.input, args.separator, args.dim)
-
-    print(f"\nData shape: {data.shape}")
-
-    if data.shape[1] != args.dim:
-        print(f"Error: Expected {args.dim} dimensions but got {data.shape[1]} dimensions in the data")
-        print("Please check your input file or adjust the --dim parameter")
-        exit(1)
-
-    # Implement M3W clustering here
-    # For now, we'll just use basic k-means as a placeholder
-    from sklearn.cluster import KMeans
-
-    kmeans = KMeans(n_clusters=args.n_clusters, random_state=42)
-    clusters = kmeans.fit_predict(data)
-
-    # Create output directory if it doesn't exist
-    ensure_dir(args.output)
-
-    # Save results
-    results = np.column_stack((data, clusters))
-    np.savetxt(args.output, results, delimiter=',', fmt='%.6f')
-
-    # Visualize if 2D
-    if args.dim == 2:
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(10, 8))
-        scatter = plt.scatter(data[:, 0], data[:, 1], c=clusters, cmap='viridis')
-        plt.colorbar(scatter)
-        plt.title(f'Clustering Results (k={args.n_clusters})')
-
-        # Ensure directory exists for visualization
-        vis_path = args.output.replace('.txt', '_visualization.png')
-        ensure_dir(vis_path)
-        plt.savefig(vis_path)
-        plt.close()
-
-    print(f"\nResults saved to: {args.output}")
-    print(f"Visualization saved as: {args.output.replace('.txt', '_visualization.png')}")
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

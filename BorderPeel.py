@@ -1,6 +1,10 @@
 import border_tools as bt
-from sklearn.base import BaseEstimator
-from sklearn.base import ClusterMixin
+from sklearn.base import BaseEstimator, ClusterMixin
+from sklearn.cluster import KMeans
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from models.self_supervised import SelfSupervisedM3W
 
 
 class BorderPeel(BaseEstimator, ClusterMixin):
@@ -27,40 +31,32 @@ class BorderPeel(BaseEstimator, ClusterMixin):
     ----------
     """
 
-    def __init__(self
-                 , method="exp_local_scaling"
-                 , max_iterations=150
-                 , mean_border_eps=-1
-                 , k=20
-                 , plot_debug_output_dir=None
-                 , min_cluster_size=3
-                 , dist_threshold=3
-                 , convergence_constant=0
-                 , link_dist_expansion_factor=3
-                 , verbose=True
-                 , border_precentile=0.1
-                 , stopping_precentile=0
-                 , merge_core_points=True
-                 , debug_marker_size=70
-                 , core_points_threshold=1
-                 , dvalue_threshold=1
-                 ):
-        self.method = method
+    def __init__(self, k=9, n_clusters=3, C=1.2, T=4, 
+                 alpha=0.7, beta=0.1, border_percentile=0.15,
+                 mean_border_eps=0.2, stopping_percentile=0.02):
+        """
+        初始化BorderPeel聚类器
+        
+        参数:
+            k (int): 近邻数量，默认9
+            n_clusters (int): 聚类数量，默认3
+            C (float): 链接距离扩展因子，默认1.2
+            T (int): 最大迭代次数，默认4
+            alpha (float): 核心点阈值，默认0.7
+            beta (float): 边界控制参数，默认0.1
+            border_percentile (float): 边界百分位数，默认0.15
+            mean_border_eps (float): 平均边界eps，默认0.2
+            stopping_percentile (float): 停止条件百分位数，默认0.02
+        """
         self.k = k
-        self.max_iterations = max_iterations
-        self.plot_debug_output_dir = plot_debug_output_dir
-        self.min_cluster_size = min_cluster_size
-        self.dist_threshold = dist_threshold
-        self.convergence_constant = convergence_constant
-        self.link_dist_expansion_factor = link_dist_expansion_factor
-        self.verbose = verbose
-        self.border_precentile = border_precentile
-        self.stopping_precentile = stopping_precentile
-        self.merge_core_points = merge_core_points
+        self.n_clusters = n_clusters
+        self.C = C
+        self.T = T
+        self.alpha = alpha
+        self.beta = beta
+        self.border_percentile = border_percentile
         self.mean_border_eps = mean_border_eps
-        self.debug_marker_size = debug_marker_size
-        self.core_points_threshold = core_points_threshold
-        self.dvalue_threshold = dvalue_threshold
+        self.stopping_percentile = stopping_percentile
 
         # out fields
         self.labels_ = None
@@ -73,58 +69,64 @@ class BorderPeel(BaseEstimator, ClusterMixin):
         self.border_values_per_iteration = None
 
     def fit(self, X, X_plot_projection=None):
-        # 初始化自监督学习模块
+        """
+        训练BorderPeel模型
+        
+        参数:
+            X: 输入特征
+            X_plot_projection: 可选的2D投影数据用于可视化
+        """
+        # 确保输入是PyTorch张量
+        if not isinstance(X, torch.Tensor):
+            X = torch.FloatTensor(X)
+        
+        # 初始化自监督模型
         self.ssl_model = SelfSupervisedM3W(
-            input_shape=X.shape[1:],
+            input_dim=X.shape[1],
             projection_dim=128,
             latent_dim=64
         )
-
+        
         # 数据增强
-        augmenter = keras.Sequential([
-            layers.RandomRotation(0.2),
-            layers.RandomTranslation(0.1, 0.1),
-            layers.RandomZoom(0.1),
-        ])
-
+        def augment(x):
+            noise = torch.randn_like(x) * 0.1
+            return x + noise
+        
         # 自监督预训练
-        optimizer = keras.optimizers.Adam()
+        optimizer = torch.optim.Adam(self.ssl_model.parameters())
+        self.ssl_model.train()
+        
         for epoch in range(10):
             # 生成两个增强视图
-            X1 = augmenter(X)
-            X2 = augmenter(X)
-
-            with tf.GradientTape() as tape:
-                # 前向传播
-                z1 = self.ssl_model.encoder(X1)
-                z2 = self.ssl_model.encoder(X2)
-                p1 = self.ssl_model.projection_head(z1)
-                p2 = self.ssl_model.projection_head(z2)
-
-                # 计算对比损失
-                loss = self.ssl_model.contrastive_loss(p1, p2)
-
+            X1 = augment(X)
+            X2 = augment(X)
+            
+            # 前向传播
+            _, p1 = self.ssl_model(X1)
+            _, p2 = self.ssl_model(X2)
+            
+            # 计算损失
+            loss = self.ssl_model.contrastive_loss(p1, p2)
+            
             # 反向传播
-            gradients = tape.gradient(
-                loss,
-                self.ssl_model.encoder.trainable_variables +
-                self.ssl_model.projection_head.trainable_variables
-            )
-            optimizer.apply_gradients(zip(
-                gradients,
-                self.ssl_model.encoder.trainable_variables +
-                self.ssl_model.projection_head.trainable_variables
-            ))
-
-            if self.verbose:
-                print(f"Epoch {epoch}, Loss: {loss:.4f}")
-
-        # 使用预训练编码器提取特征
-        X_features = self.ssl_model.encoder.predict(X)
-
-        # 原始的M3W聚类
-        result = self._cluster_features(X_features)
-        return result
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            if hasattr(self, 'verbose') and self.verbose:
+                print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
+        
+        # 提取特征
+        self.ssl_model.eval()
+        with torch.no_grad():
+            features, _ = self.ssl_model(X)
+            features = features.numpy()
+        
+        # 执行聚类
+        kmeans = KMeans(n_clusters=self.n_clusters, random_state=42)
+        self.labels_ = kmeans.fit_predict(features)
+        
+        return self
 
     def fit_predict(self, X, X_plot_projection=None):
         """Performs BorderPeel clustering clustering on X and returns cluster labels.
@@ -140,3 +142,20 @@ class BorderPeel(BaseEstimator, ClusterMixin):
 
         self.fit(X, X_plot_projection=X_plot_projection)
         return self.labels_
+
+    def _supervised_training(self, features, pseudo_labels):
+        """监督训练方法"""
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(self.parameters())
+        
+        for epoch in range(self.config['epochs']):
+            self.train()
+            optimizer.zero_grad()
+            
+            # 前向传播
+            outputs = self(features)
+            loss = criterion(outputs, pseudo_labels)
+            
+            # 反向传播
+            loss.backward()
+            optimizer.step()

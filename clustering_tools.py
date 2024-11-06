@@ -17,13 +17,26 @@ from sklearn import preprocessing
 
 def read_data(file_path):
     """Read data from CSV file"""
-    data = pd.read_csv(file_path, header=None)
-    if data.shape[1] > 2:  # If there are more than 2 columns, assume last column is labels
-        X = data.iloc[:, :-1].values  # All columns except last
-        y = data.iloc[:, -1].values   # Last column
-        return X, y
-    else:
-        return data.values, None
+    try:
+        # Read the CSV file
+        data = pd.read_csv(file_path, header=None)
+        print(f"\nData shape: {data.shape}")
+        print(f"First few rows of data:\n{data.head()}")
+        
+        if data.shape[1] > 2:  # If there are more than 2 columns
+            X = data.iloc[:, :-1].values  # All columns except last
+            y = data.iloc[:, -1].values   # Last column
+            print(f"\nFeatures shape: {X.shape}")
+            print(f"Labels shape: {y.shape}")
+            print(f"Unique labels: {np.unique(y)}")
+            return X, y
+        else:
+            print("\nWarning: Input file has 2 or fewer columns.")
+            print("Expected format: feature1,feature2,...,featureN,label")
+            return data.values, None
+    except Exception as e:
+        print(f"\nError reading file: {str(e)}")
+        raise
 
 
 # read arff file:
@@ -280,34 +293,34 @@ def clusters_to_labels(clusters, labels, force_unique=False):
     return new_clusters
 
 
-def evaluate_clustering(X, labels_true, labels):
-    '''
-
-    Parameters
-    ----------
-    X
-    labels_true
-    labels
-
-    Returns
-    -------
-
-    '''
-    # print('Estimated number of clusters: %d' % n_clusters_)
-    print("Homogeneity: %0.3f" % metrics.homogeneity_score(labels_true, labels))
-    print("Completeness: %0.3f" % metrics.completeness_score(labels_true, labels))
-    print("V-measure: %0.3f" % metrics.v_measure_score(labels_true, labels))
-    print("Adjusted Rand Index: %0.3f"
-          % metrics.adjusted_rand_score(labels_true, labels))
-    print("Adjusted Mutual Information: %0.3f"
-          % metrics.adjusted_mutual_info_score(labels_true, labels))
-    print("Normalized Mutual Information: %0.3f"
-          % metrics.normalized_mutual_info_score(labels_true, labels))
-    try:
-        print("Silhouette Coefficient: %0.3f"
-              % metrics.silhouette_score(X, labels))
-    except ValueError:
-        print("Silhouette Coefficient: None")
+def evaluate_clustering(features, labels, predictions):
+    """评估聚类结果
+    
+    参数:
+        features: 特征矩阵
+        labels: 真实标签
+        predictions: 预测的聚类标签
+    """
+    from sklearn import metrics
+    
+    results = {
+        'ARI': metrics.adjusted_rand_score(labels, predictions),
+        'NMI': metrics.normalized_mutual_info_score(labels, predictions),
+        'AMI': metrics.adjusted_mutual_info_score(labels, predictions),
+        'Homogeneity': metrics.homogeneity_score(labels, predictions),
+        'Completeness': metrics.completeness_score(labels, predictions),
+        'V-measure': metrics.v_measure_score(labels, predictions),
+        'Silhouette': metrics.silhouette_score(features, predictions)
+    }
+    
+    # 打印评估结果
+    print("\nClustering Evaluation Results:")
+    print("-" * 30)
+    for metric, value in results.items():
+        print(f"{metric}: {value:.4f}")
+    print("-" * 30)
+    
+    return results
 
 
 def cluster_and_evaluate(path_or_data, method):
@@ -723,3 +736,28 @@ class MethodsEvaluation:
                                       ["%0.3f" % s for s in score[EvaluationFields.clusters_num.value:]])
 
         return CLUSTERS_EVALUATION_COLUMNS[:], formatted_list
+
+    def evaluate_clustering(self, features, labels):
+        """评估聚类结果"""
+        from sklearn import metrics
+        
+        predictions = self.predict(features)
+        
+        results = {
+            'ARI': metrics.adjusted_rand_score(labels, predictions),
+            'NMI': metrics.normalized_mutual_info_score(labels, predictions),
+            'AMI': metrics.adjusted_mutual_info_score(labels, predictions),
+            'Homogeneity': metrics.homogeneity_score(labels, predictions),
+            'Completeness': metrics.completeness_score(labels, predictions),
+            'V-measure': metrics.v_measure_score(labels, predictions),
+            'Silhouette': metrics.silhouette_score(features, predictions)
+        }
+        
+        # 打印评估结果
+        print("\nClustering Evaluation Results:")
+        print("-" * 30)
+        for metric, value in results.items():
+            print(f"{metric}: {value:.4f}")
+        print("-" * 30)
+        
+        return results
